@@ -2,11 +2,17 @@ const express = require("express");
 const http = require("http");
 const cors = require("cors");
 const { Server } = require("socket.io");
+const dotenv = require("dotenv");
 
 //Import socketHandler 
 const socketHandler = require("./src/socket/socketHandler");
 
+// Load environment variables
+dotenv.config();
+
 const app = express();
+
+const PORT = process.env.PORT || 5000;
 
 // Middlewares
 app.use(cors());
@@ -23,7 +29,7 @@ const server = http.createServer(app);
 // Socket.IO
 const io = new Server(server, {
   cors: {
-    origin: "*",
+    origin: process.env.CLIENT_ORIGIN,
   },
 });
 
@@ -31,7 +37,6 @@ const io = new Server(server, {
 socketHandler(io);
 
 // Server start
-const PORT = 5000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });

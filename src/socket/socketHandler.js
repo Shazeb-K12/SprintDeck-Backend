@@ -2,6 +2,7 @@ const { randomUUID } = require("crypto");
 
 const rooms = {};
 const MAX_PLAYERS = 15;
+const emojiCooldown = {}; // socket.id -> timestamp
 
 /* =======================
    VOTE DISTRIBUTION
@@ -40,7 +41,7 @@ const socketHandler = (io) => {
     console.log("User connected:", socket.id);
 
     /* =======================
-       CREATE GAME (HOST)
+       CREATE GAME
     ======================= */
     socket.on("create-game", ({ gameName, playerName }, callback) => {
       const roomId = randomUUID().slice(0, 6);
@@ -57,6 +58,7 @@ const socketHandler = (io) => {
             name: playerName,
             role: "host",
             selectedCard: null,
+            disconnected: false,
           },
         ],
       };
@@ -73,9 +75,8 @@ const socketHandler = (io) => {
       "join-game",
       ({ roomId, playerName, role = "player" }, callback) => {
         const room = rooms[roomId];
-        if (!room) {
+        if (!room)
           return callback({ success: false, message: "Room not found" });
-        }
 
         if (room.players.length >= MAX_PLAYERS) {
           return callback({ success: false, message: "Room full" });
@@ -88,6 +89,7 @@ const socketHandler = (io) => {
           name: playerName,
           role: finalRole,
           selectedCard: null,
+          disconnected: false,
         });
 
         socket.join(roomId);
@@ -97,24 +99,24 @@ const socketHandler = (io) => {
     );
 
     /* =======================
-       REJOIN GAME (REFRESH FIX)
+       REJOIN GAME
     ======================= */
     socket.on("rejoin-game", ({ gameId, playerName, role }) => {
       const room = rooms[gameId];
       if (!room) return;
 
-      const existingPlayer = room.players.find(
-        (p) => p.name === playerName
-      );
+      const existingPlayer = room.players.find((p) => p.name === playerName);
 
       if (existingPlayer) {
         existingPlayer.socketId = socket.id;
+        existingPlayer.disconnected = false;
       } else {
         room.players.push({
           socketId: socket.id,
           name: playerName,
           role: role || "player",
           selectedCard: null,
+          disconnected: false,
         });
       }
 
@@ -157,7 +159,7 @@ const socketHandler = (io) => {
     });
 
     /* =======================
-       MANUAL REVEAL (HOST)
+       MANUAL REVEAL
     ======================= */
     socket.on("reveal-cards", ({ roomId }) => {
       const room = rooms[roomId];
@@ -165,9 +167,7 @@ const socketHandler = (io) => {
       if (room.hostId !== socket.id) return;
 
       room.revealed = true;
-      const { votes, mostVotedCards } = calculateVoteDistribution(
-        room.players
-      );
+      const { votes, mostVotedCards } = calculateVoteDistribution(room.players);
       room.votes = votes;
       room.mostVotedCards = mostVotedCards;
 
@@ -193,40 +193,61 @@ const socketHandler = (io) => {
     });
 
     /* =======================
-       DISCONNECT (SAFE)
+       DISCONNECT (REFRESH SAFE)
     ======================= */
     socket.on("disconnect", () => {
-      setTimeout(() => {
-        for (const roomId in rooms) {
-          const room = rooms[roomId];
+      for (const roomId in rooms) {
+        const room = rooms[roomId];
+        const player = room.players.find((p) => p.socketId === socket.id);
+        if (!player) continue;
 
+        player.disconnected = true;
+
+        setTimeout(() => {
           const index = room.players.findIndex(
-            (p) => p.socketId === socket.id
+            (p) => p.socketId === socket.id && p.disconnected
           );
-          if (index === -1) continue;
+          if (index === -1) return;
 
           const leavingPlayer = room.players[index];
           room.players.splice(index, 1);
 
-          if (room.hostId === socket.id) {
-            const newHost = room.players.find(
-              (p) => p.role !== "spectator"
-            );
-
+          if (room.hostId === leavingPlayer.socketId) {
+            const newHost = room.players.find((p) => p.role !== "spectator");
             if (newHost) {
               room.hostId = newHost.socketId;
               io.to(newHost.socketId).emit("host-assigned", {
                 message: "You are now the host!",
               });
-            } else if (room.players.length === 0) {
+            } else {
               delete rooms[roomId];
               return;
             }
           }
 
           io.to(roomId).emit("room-update", room);
-        }
-      }, 2000); // ⏳ refresh grace period
+        }, 2000);
+      }
+    });
+
+    /* =======================
+          FIRE EMOJI
+    ======================= */
+    socket.on("send-emoji", ({ roomId, fromUserId, toUserId, emoji }) => {
+      const now = Date.now();
+      if (emojiCooldown[socket.id] && now - emojiCooldown[socket.id] < 1000) {
+        return;
+      }
+      emojiCooldown[socket.id] = now;
+
+      const room = rooms[roomId];
+      if (!room) return;
+
+      socket.to(roomId).emit("emoji-received", {
+        fromUserId,
+        toUserId,
+        emoji,
+      });
     });
   });
 };
